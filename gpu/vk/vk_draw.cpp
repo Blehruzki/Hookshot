@@ -2287,6 +2287,17 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
         driver_fault_note(p.key);
     }
     if (cold && r == VK_PIPELINE_COMPILE_REQUIRED) return *cold = true, VK_NULL_HANDLE;
+    {   // (hookshot) a slow one named, as the compute pipelines' are: on a Radeon 890M (Adrenalin 26.10.1) four workers sat in
+        // vkCreateGraphicsPipelines for minutes each, 160-270 s of CPU, and a draw that waits for its pipeline held the picture
+        // for 350 s after a cutscene's movie; the log had the total alone ("1089 pipelines (1521567 ms)")
+        const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        static std::atomic<int> told{0};
+        if (ms >= 1000 && told++ < 100)
+            logf("vk: graphics pipeline of %016llx: SLOW compile, %lld ms (%s, %s%zu stages, %d colour targets%s%s)",
+                 (unsigned long long)p.key, (long long)ms, part < 0 ? "whole" : part == 1 ? "library: pre-rasterization"
+                 : part == 2 ? "library: fragment shader" : "library", p.mesh ? "mesh, " : "", stages.size(), at.n,
+                 ci.flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT ? ", not optimized" : "", r == VK_SUCCESS ? "" : ", not made");
+    }
     if (part >= 0) {
         if (r != VK_SUCCESS) {
             static std::atomic<int> logged;
