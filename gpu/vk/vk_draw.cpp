@@ -2292,7 +2292,7 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
         // for 350 s after a cutscene's movie; the log had the total alone ("1089 pipelines (1521567 ms)")
         const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
         static std::atomic<int> told{0};
-        if (ms >= 1000 && told++ < 100)
+        if (ms >= 5000 || (ms >= 1000 && told++ < 100))   // (the long ones always: a session's first hundred came before its 55 s and 167 s stalls)
             logf("vk: graphics pipeline of %016llx: SLOW compile, %lld ms (%s, %s%zu stages, %d colour targets%s%s)",
                  (unsigned long long)p.key, (long long)ms, part < 0 ? "whole" : part == 1 ? "library: pre-rasterization"
                  : part == 2 ? "library: fragment shader" : "library", p.mesh ? "mesh, " : "", stages.size(), at.n,
