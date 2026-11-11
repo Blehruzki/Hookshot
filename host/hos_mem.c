@@ -248,8 +248,35 @@ void hos_region_free(uint64_t addr) {
             break;
         }
     }
+    uint64_t live = 0;
+    const int live_n = nregions;
+    for (int i = 0; i < nregions; i++) live += regions[i].size;
     UNLOCK();
     if (freed_size && !decommitted) discard_pages(freed, freed_size);
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+    {   /* (experiment) HOS_REGION_LOG=1: every 256 frees, what the guest window holds committed against what is
+           handed out (the image and system region, the heap, the live address regions) */
+        static int on = -1;
+        static uint64_t n;
+        if (on < 0) on = env_on("HOS_REGION_LOG");
+        if (on && ++n % 256 == 1) {
+            uint64_t committed = 0, high = 0;
+            for (uint64_t a = 0; a < HOS_GUEST_SPACE;) {
+                MEMORY_BASIC_INFORMATION m;
+                if (!VirtualQuery(GP(a), &m, sizeof m)) break;
+                const uint64_t end = (uint64_t)((uint8_t *)m.BaseAddress + m.RegionSize - (uint8_t *)GP(0));
+                if (m.State == MEM_COMMIT) {
+                    committed += m.RegionSize;
+                    if (a >= HOS_HEAP_BASE + hos_heap_size) high += m.RegionSize;
+                }
+                a = end > a ? end : a + 0x1000;
+            }
+            hos_log("mem: guest window %llu MB committed (%llu MB of it above the heap); heap %llu MB; %d live address "
+                    "regions, %llu MB; %llu frees", (unsigned long long)(committed >> 20), (unsigned long long)(high >> 20),
+                    (unsigned long long)(hos_heap_size >> 20), live_n, (unsigned long long)(live >> 20), (unsigned long long)n);
+        }
+    }
+#endif
 }
 
 /* ---- nn::os memory -------------------------------------------------------------------------------------- */
