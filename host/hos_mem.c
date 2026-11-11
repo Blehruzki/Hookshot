@@ -183,8 +183,60 @@ int hos_regions(uint64_t (*out)[2], int cap) {
     return n;
 }
 
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+/* (hookshot) HOS_FREE_REGION_DECOMMIT=1: a freed address region's pages go back to Windows (decommitted), not only
+   their contents (discard_pages keeps them committed). The game frees and takes regions as areas load, and the freed
+   ones stayed in the process's commit charge for the rest of the session: on a 24 GB handheld the guest window's
+   commit went from 11.1 to 14.3 GB in 67 minutes of play, and the session after it ended at Windows' commit limit.
+   The next hos_region_alloc there commits its pages again, zeroed; a stray touch is committed by mkw_glue.c's
+   handler. In 2 MB steps: a step the Vulkan back end still imports stays committed (decommitted pages under an
+   import faulted the device: FreeMemoryPages below) and is discarded as before. Only whole 64 KB blocks inside the
+   region, the unit hos_commit rounds to, so a neighbour's pages in the same block are left alone. Returns 0 when
+   the switch is off (or large pages are on: those cannot be decommitted piecewise) */
+static int region_decommit(uint64_t addr, uint64_t size) {
+    static int on = -1;
+    if (on < 0) on = env_on("HOS_FREE_REGION_DECOMMIT") && !env_on("HOS_KEEP_FREED_PAGES");
+    extern int hos_large_pages;
+    if (!on || hos_large_pages || !hos_guest_range(addr, size)) return 0;
+    extern int rx_guest_imported(uint64_t lo, uint64_t hi);
+    static uint64_t given, kept, frees;   /* (bytes; under no lock: a log line's figures only) */
+    const uint64_t lo = (addr + 0xFFFF) & ~0xFFFFULL, hi = (addr + size) & ~0xFFFFULL;
+    if (lo > addr) discard_pages(addr, (lo < addr + size ? lo : addr + size) - addr);
+    if (hi > lo && hi < addr + size) discard_pages(hi, addr + size - hi);
+    for (uint64_t a = lo; a < hi;) {
+        const uint64_t step = (a + 0x200000) & ~0x1FFFFFULL, b = step < hi ? step : hi;
+        if (rx_guest_imported(a, b) || !VirtualFree(GP(a), (SIZE_T)(b - a), MEM_DECOMMIT)) {
+            discard_pages(a, b - a);
+            kept += b - a;
+        } else given += b - a;
+        a = b;
+    }
+    if (++frees % 64 == 1)
+        hos_log("mem: %llu address regions freed: %llu MB given back to Windows, %llu MB kept under the GPU's imports "
+                "(HOS_FREE_REGION_DECOMMIT)", (unsigned long long)frees, (unsigned long long)(given >> 20),
+                (unsigned long long)(kept >> 20));
+    return 1;
+}
+#endif
+
 void hos_region_free(uint64_t addr) {
     uint64_t freed = 0, freed_size = 0;
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+    /* (HOS_FREE_REGION_DECOMMIT: the pages go while the region is still listed, so no hos_region_alloc on another
+       thread can be handed them, and commit them, before they are decommitted) */
+    LOCK();
+    for (int i = 0; i < nregions; i++)
+        if (regions[i].addr == addr) {
+            freed = regions[i].addr;
+            freed_size = regions[i].size;
+            break;
+        }
+    UNLOCK();
+    const int decommitted = freed_size && region_decommit(freed, freed_size);
+    freed = freed_size = 0;
+#else
+    const int decommitted = 0;
+#endif
     LOCK();
     for (int i = 0; i < nregions; i++) {
         if (regions[i].addr == addr) {
@@ -197,7 +249,7 @@ void hos_region_free(uint64_t addr) {
         }
     }
     UNLOCK();
-    if (freed_size) discard_pages(freed, freed_size);
+    if (freed_size && !decommitted) discard_pages(freed, freed_size);
 }
 
 /* ---- nn::os memory -------------------------------------------------------------------------------------- */
