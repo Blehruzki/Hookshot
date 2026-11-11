@@ -6,6 +6,9 @@
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 #include "vk_internal.h"
 #include <vk_mem_alloc.h>
+#ifdef _WIN32
+#include <dxgi.h>   // (dedicated_video_memory)
+#endif
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -369,6 +372,35 @@ std::atomic<uint32_t> budget_frame{0};   // (VMA's frame index: a new one makes 
 bool vram_usage_now(uint64_t* used, uint64_t* budget) {
     vmaSetCurrentFrameIndex(vma, ++budget_frame);
     return vram_usage(used, budget) && dev.memory_budget;
+}
+// (hookshot) The memory set aside for the GPU alone, as Windows reports it for the adapter Vulkan renders on (its dedicated video
+// memory: an integrated GPU's firmware "VRAM" setting, 6 GB on a ROG Xbox Ally X, 0.5 GB on most laptops); 0 elsewhere and
+// when no adapter matches. Vulkan's heaps do not tell it apart from shared memory. For igpu_texture_cap.h
+uint64_t dedicated_video_memory() {
+#ifdef _WIN32
+    static const uint64_t bytes = []() -> uint64_t {
+        // (dxgi.dll at run time, from the system's folder: nothing more to link)
+        const HMODULE dxgi = LoadLibraryExA("dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!dxgi) return 0;
+        using Create = HRESULT(WINAPI*)(REFIID, void**);
+        const Create create = (Create)(void*)GetProcAddress(dxgi, "CreateDXGIFactory1");
+        IDXGIFactory1* factory = nullptr;
+        if (!create || FAILED(create(__uuidof(IDXGIFactory1), (void**)&factory)) || !factory) return 0;
+        uint64_t most = 0;
+        IDXGIAdapter1* adapter = nullptr;
+        for (UINT i = 0; factory->EnumAdapters1(i, &adapter) == S_OK; i++) {
+            DXGI_ADAPTER_DESC1 d{};
+            if (SUCCEEDED(adapter->GetDesc1(&d)) && d.VendorId == dev.props.vendorID && d.DeviceId == dev.props.deviceID)
+                most = std::max<uint64_t>(most, d.DedicatedVideoMemory);
+            adapter->Release();
+        }
+        factory->Release();
+        return most;
+    }();
+    return bytes;
+#else
+    return 0;
+#endif
 }
 bool system_heap_usage(uint64_t* used, uint64_t* budget) {
     vmaSetCurrentFrameIndex(vma, ++budget_frame);
