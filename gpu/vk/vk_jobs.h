@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 
 namespace mkwvk {
@@ -18,6 +19,9 @@ void jobs_push(std::function<void()> fn, bool urgent = false, const std::atomic<
 void jobs_push_serial(std::function<void()> fn, std::function<void()> on_failure = {});
 /// Waits until flag is set by a job (which calls jobs_notify after setting it)
 void jobs_wait(const std::atomic<bool>& flag);
+/// Waits for flag at most ms milliseconds, without running the job on the waiting thread (still queued: moved to the front).
+/// Whether the flag is set
+bool jobs_wait_for(const std::atomic<bool>& flag, int64_t ms);
 void jobs_notify();
 int jobs_pending();
 
