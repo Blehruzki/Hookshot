@@ -218,6 +218,7 @@ int hos_heap_size_fits(uint64_t size) {
     const uint64_t limit = region_floor < HOS_SPACE_END ? region_floor : HOS_SPACE_END;
     return limit >= HOS_HEAP_BASE && size <= limit - HOS_HEAP_BASE;
 }
+int hos_heap_on_touch;   /* (HOS_HEAP_ON_TOUCH, below: nn_fs.c commits a read's or a write's buffer itself then) */
 /* nn::os::SetMemoryHeapSize(unsigned long) -> Result */
 HLE(_ZN2nn2os17SetMemoryHeapSizeEm) {
     uint64_t size = ARG(0);
@@ -239,9 +240,22 @@ HLE(_ZN2nn2os17SetMemoryHeapSizeEm) {
         for (uint64_t a = HOS_HEAP_BASE + hos_heap_size; a < HOS_HEAP_BASE + size; a += 4096) *(volatile uint8_t *)GP(a) = 0;
         hos_log("heap: %llu MB prefaulted in %.0f ms", (unsigned long long)((size - hos_heap_size) >> 20), (hos_now_ns() - t0) / 1e6);
     }
-    if (size > hos_heap_size) hos_commit(HOS_HEAP_BASE + hos_heap_size, size - hos_heap_size);
+    /* (hookshot) HOS_HEAP_ON_TOUCH=1 (Windows): the heap's pages are committed as they are first touched (mkw_glue.c's
+       handler, 64 KB at a time; a file read or write commits its buffer first: nn_fs.c), not all at once here. The
+       game sets a 6894 MB heap and had touched about 2.5 GB of it after an hour of play; the rest only counted
+       against Windows' commit limit, which a 24 GB handheld's session ran into. Not with large pages */
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+    {
+        extern int hos_large_pages;
+        static int asked = -1;
+        if (asked < 0) asked = env_on("HOS_HEAP_ON_TOUCH");
+        hos_heap_on_touch = asked && !hos_large_pages;
+    }
+#endif
+    if (size > hos_heap_size && !hos_heap_on_touch) hos_commit(HOS_HEAP_BASE + hos_heap_size, size - hos_heap_size);
     hos_heap_size = size;
-    hos_log("heap: %llu MB at %#llx", (unsigned long long)(size >> 20), (unsigned long long)HOS_HEAP_BASE);
+    hos_log("heap: %llu MB at %#llx%s", (unsigned long long)(size >> 20), (unsigned long long)HOS_HEAP_BASE,
+            hos_heap_on_touch ? ", committed as it is touched (HOS_HEAP_ON_TOUCH)" : "");
     RET(0);
 }
 
