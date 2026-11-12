@@ -54,6 +54,7 @@ struct NvnState {};
 struct ParLock {};
 struct DrawArgs { bool indirect = true; int groups[3]{1, 1, 1}; int first_task = 0; };
 int fallback_task_groups(const Program&) { std::abort(); }
+bool wait_capped(const std::atomic<bool>&, long long, const Program*) { std::abort(); }   // (RX_VK_PIPE_WAIT_MS: not set here)
 void draw(int, NvnState&, const DrawArgs&) { std::abort(); }
 Program* current;
 PipeEntry pipe_entry;

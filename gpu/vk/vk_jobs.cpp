@@ -2,6 +2,7 @@
 // virtual cores, and the replay thread is one of the busiest.
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <exception>
 #include <condition_variable>
 #include <deque>
@@ -148,6 +149,22 @@ void jobs_wait(const std::atomic<bool>& flag) {
                 break;
             }
     done_cv.wait(lk, [&] { return flag.load(std::memory_order_acquire); });
+}
+// (hookshot) A wait that gives up: the job is not run here, where nothing could stop it (a Radeon 890M's driver took 27-38 s
+// for one graphics pipeline, and the draw that waited held every frame for as long). Still queued, it goes to the front for
+// the next free worker
+bool jobs_wait_for(const std::atomic<bool>& flag, int64_t ms) {
+    std::unique_lock lk(mu);
+    if (!flag.load(std::memory_order_acquire))
+        for (auto it = queue.begin(); it != queue.end(); ++it)
+            if (it->flag == &flag) {
+                Entry e = std::move(*it);
+                queue.erase(it);
+                queue.push_front(std::move(e));
+                work_cv.notify_one();
+                break;
+            }
+    return done_cv.wait_for(lk, std::chrono::milliseconds(ms), [&] { return flag.load(std::memory_order_acquire); });
 }
 int jobs_pending() {
     return pending.load();

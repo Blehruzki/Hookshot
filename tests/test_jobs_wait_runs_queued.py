@@ -2,6 +2,7 @@
 
 vk_jobs.cpp is compiled beside stand-ins for vk_internal.h and vk_draw.h (logging, the thread calls, ub_thread_off) and
 run with every worker held in a job: the draw's pipeline job, queued behind them, must run on the thread that waits.
+A bounded wait (jobs_wait_for, RX_VK_PIPE_WAIT_MS) gives up instead and leaves the job to a worker.
 python -I -B tests/test_jobs_wait_runs_queued.py
 """
 import argparse
@@ -48,6 +49,14 @@ def check_source():
     wait = wait[:wait.index("\n}\n")]
     if "it->flag == &flag" not in wait or 'getenv("RX_VK_JOB_STEAL")' not in wait:
         raise SystemExit("jobs_wait no longer runs a queued job it waits for")
+    bounded = jobs[jobs.index("bool jobs_wait_for("):]
+    bounded = bounded[:bounded.index("\n}\n")]
+    if "run_guarded" in bounded or "wait_for(lk" not in bounded:
+        raise SystemExit("jobs_wait_for runs the job on the waiting thread, or waits without a limit")
+    if 'getenv("RX_VK_PIPE_WAIT_MS")' not in draw or "wait_capped(ready, wait_cap_ms, cp)" not in draw or "jobs_wait_for(ready, cap_ms)" not in draw:
+        raise SystemExit("draw() no longer bounds its wait under RX_VK_PIPE_WAIT_MS")
+    if 'getenv("RX_VK_PIPE_WAIT_MS") ? std::max(0, atoi(getenv("RX_VK_PIPE_WAIT_MS"))) : -1' not in draw:
+        raise SystemExit("RX_VK_PIPE_WAIT_MS is no longer off by default")
 
 
 def main():

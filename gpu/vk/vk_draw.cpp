@@ -6381,6 +6381,30 @@ void mask_stabilize(VkCommandBuffer cmd, Texture* tex, uint32_t level, uint32_t 
     if (told++ == 0) logf("vk: tree-shadow mask blend on #%u %ux%u, weight %.2f", tex->id, w, h, weight);
 }
 
+/// RX_VK_PIPE_WAIT_MS: a draw's wait for its program or pipeline (ready), cap_ms at most. False when it gave up: the draw
+/// is left out, and so is every later one of it until ready, with no second wait (one object missing, not a stall a frame).
+/// Out of draw()'s readiness block, which tests/test_draw_side_effects.py compiles alone
+static bool wait_capped(const std::atomic<bool>& ready, int64_t cap_ms, const Program* cp) {
+    static std::mutex gave_up_mu;
+    static std::unordered_set<const std::atomic<bool>*> gave_up;   // (waited for once: not again every frame)
+    {
+        std::lock_guard lk(gave_up_mu);
+        if (gave_up.count(&ready)) return false;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool done = jobs_wait_for(ready, cap_ms);
+    st_waits++;
+    st_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (done) return true;
+    static std::atomic<int> told{0};
+    if (told++ < 40)
+        logf("vk: a draw of program %016llx left out after waiting %lld ms (RX_VK_PIPE_WAIT_MS): its %s is not ready",
+             (unsigned long long)cp->key, (long long)cap_ms, &ready == &cp->ready ? "program" : "pipeline");
+    std::lock_guard lk(gave_up_mu);
+    gave_up.insert(&ready);
+    return false;
+}
+
 static bool writes_memory(const Program& p) {
     for (const Stage& st : p.stages) {
         const auto& info = st.info;
@@ -6544,16 +6568,24 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     // RX_VK_PIPE_SKIP=2 restores the old translation skip for persistent targets; after translation, memory-writing pipelines wait.
     static const bool always_wait = getenv("RX_VK_PIPE_SKIP") && atoi(getenv("RX_VK_PIPE_SKIP")) == 0;
     static const bool legacy_translation_skip = getenv("RX_VK_PIPE_SKIP") && atoi(getenv("RX_VK_PIPE_SKIP")) == 2;
+    // (hookshot, RX_VK_PIPE_WAIT_MS=<ms>: a draw that must wait gives up after that long and is left out until its program or
+    // pipeline is ready, each one waited for once. Off by default: waited for without limit, as before; a draw that writes memory is left out too, which RX_VK_PIPE_SKIP's rule
+    // otherwise never does: the cost of the cap. On a Radeon 890M
+    // (Adrenalin 26.10.1) single graphics pipelines took 27-38 s to compile, and the three stalls of a 67-minute session, 7 s,
+    // 20 s and 24.5 s, were this wait: no frame presented meanwhile, where the draw left out is one object missing for as long)
+    static const int64_t wait_cap_ms = getenv("RX_VK_PIPE_WAIT_MS") ? std::max(0, atoi(getenv("RX_VK_PIPE_WAIT_MS"))) : -1;
     auto wait_for = [&](const std::atomic<bool>& ready) {
         PROF_EXACT();
+        if (wait_cap_ms >= 0) return wait_capped(ready, wait_cap_ms, cp);
         const auto t0 = std::chrono::steady_clock::now();
         jobs_wait(ready);
         st_waits++;
         st_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return true;
     };
     if (!cp->ready.load(std::memory_order_acquire)) {
         if (legacy_translation_skip && targets_persistent(at)) return void(st_pending_skips++);
-        wait_for(cp->ready);
+        if (!wait_for(cp->ready)) return void(st_pending_skips++);
     }
     if (exposure_log_on() && cp) exposure_note(s, *cp);
     if (cp->failed) SKIP_HERE();
@@ -6585,7 +6617,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     if (!pe->ready.load(std::memory_order_acquire)) {
         const bool may_skip = !always_wait && targets_persistent(at) && !writes_memory(p);
         if (may_skip) return void(st_pending_skips++);
-        wait_for(pe->ready);
+        if (!wait_for(pe->ready)) return void(st_pending_skips++);
     }
     const VkPipeline pl = pe->pipeline;
     if (!pl) SKIP_HERE();
