@@ -424,6 +424,7 @@ static uint64_t read_at(Ctx *c, uint64_t id, int64_t off, uint64_t buf, uint64_t
         ov.Offset = (DWORD)o;
         ov.OffsetHigh = (DWORD)(o >> 32);
         DWORD chunk = (DWORD)(size - done > 0x40000000 ? 0x40000000 : size - done), got = 0;
+        if (hos_heap_on_touch) hos_commit(buf + done, chunk);   /* (the kernel does not commit a page it writes) */
         if (!ReadFile(fh->h, GP(buf + done), chunk, &got, &ov) || !got) break;
         done += got;
     }
@@ -469,6 +470,7 @@ HLE(_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE) {
     ov.OffsetHigh = (DWORD)(ARG(1) >> 32);
     DWORD put = 0;
     /* (hookshot) from guest memory only, and the whole size: a DWORD cut wrote less than asked and said so */
+    if (hos_heap_on_touch && ARG(3) <= 0xFFFFFFFFu) hos_commit(ARG(2), ARG(3));   /* (nor one it reads) */
     if (ARG(3) <= 0xFFFFFFFFu && hos_guest_range(ARG(2), ARG(3))) WriteFile(fh->h, GP(ARG(2)), (DWORD)ARG(3), &put, &ov);
     RET(put == ARG(3) ? 0 : 0x2EE202);
 }
