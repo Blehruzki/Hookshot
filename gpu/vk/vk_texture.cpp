@@ -53,6 +53,7 @@
 #include "drawn_writeback.h"
 #include "vram_compact.h"
 #include "evict_reason.h"
+#include "igpu_texture_cap.h"
 #include "keep_rendered.h"
 #include "target_overlap.h"
 #include "host_shaders/block_linear_unswizzle_2d_comp_spv.h"
@@ -4224,6 +4225,17 @@ void texture_frame(uint64_t completed) {
 
             budget = std::max<uint64_t>(budget, 1024ull << 20);  // Minimum 1 GB
             budget = std::min(budget, driver_budget);  // Don't exceed driver's limit
+            // (hookshot) not where the firmware sets memory aside for the GPU alone (a handheld's "VRAM" setting): the tiers
+            // above count the RAM the game shares, and that memory is not shared (igpu_texture_cap.h).
+            // RX_VK_IGPU_SHARED_CAP=1: the tiers alone
+            static const bool shared_only = env_on("RX_VK_IGPU_SHARED_CAP");
+            static const uint64_t aside = shared_only ? 0 : dedicated_video_memory();
+            const uint64_t tier = budget;
+            budget = std::min(igpu_texture_cap::bytes(budget, aside), driver_budget);
+            if (budget > tier && !told)
+                logf("vk: integrated GPU texture budget: %llu MB, not %llu MB: %llu MB of memory is set aside for the GPU alone "
+                     "(RX_VK_IGPU_SHARED_CAP=1: %llu MB)", (unsigned long long)(budget >> 20), (unsigned long long)(tier >> 20),
+                     (unsigned long long)(aside >> 20), (unsigned long long)(tier >> 20));
             own = budget;
 
             if (!told) {
