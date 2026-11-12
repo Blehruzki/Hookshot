@@ -21,6 +21,7 @@
 #include "presenter_queue.h"
 static_assert(mkwvk::kQueueGraphics == VK_QUEUE_GRAPHICS_BIT && mkwvk::kQueueCompute == VK_QUEUE_COMPUTE_BIT);
 #include "gpu_choice.h"
+#include "gpu_sched_note.h"
 #include "vk_menu.h"
 #include "vk_dlss.h"
 #include "vk_fsr4.h"
@@ -1468,6 +1469,21 @@ const MkwVkRenderer* mkwvk_init(const MkwVkHost* h) {
          dev.props.driverVersion, dev.mesh_shader ? "yes" : "no", dev.external_memory_host ? "yes" : "no",
          dev.graphics_pipeline_library ? "yes" : "no");
     logf("vk: driver: %s", driver_text().c_str());   // (the builders' Save my pipeline list reads it: nx2/pipeline_share.py)
+#ifdef _WIN32
+    {   // (hookshot) whether Windows leaves the GPU's scheduling to the driver: gpu_sched_note.h
+        // (advapi32 by name at run time: hookshot_vk.dll's link has it only with NVIDIA's DLSS library)
+        using RegGetValueFn = LONG(WINAPI*)(HKEY, LPCSTR, LPCSTR, DWORD, LPDWORD, PVOID, LPDWORD);
+        DWORD mode = 0, size = sizeof mode;
+        const HMODULE adv = LoadLibraryExA("advapi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        const RegGetValueFn get = adv ? (RegGetValueFn)(void*)GetProcAddress(adv, "RegGetValueA") : nullptr;
+        if (!get || get(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers", "HwSchMode", RRF_RT_REG_DWORD,
+                        nullptr, &mode, &size) != ERROR_SUCCESS)
+            mode = 0;
+        char line[512];
+        gpu_sched_note::text((int)mode, dev.props.vendorID, line, sizeof line);
+        logf("%s", line);
+    }
+#endif
     if (!dev.mesh_shader && !dev.mesh_fallback && !env_on("RX_VK_NO_MESH_WARNING")) {
         // (the game draws its foliage, grass and many effects with mesh shaders: without them those draws are left out and the
         // picture is broken (an RX 580's "static"-like scenes, 2026-11-08). Said once, on its own thread, and the game goes on.)
