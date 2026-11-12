@@ -59,7 +59,13 @@ static LONG CALLBACK commit_on_touch(EXCEPTION_POINTERS *info) {
     const uint64_t guest = (uint64_t)(p - A64_MEM);
     if (guest < 0x100000) return EXCEPTION_CONTINUE_SEARCH;   /* (a null pointer: the game's own fault) */
     MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery(p, &mbi, sizeof mbi) || mbi.State != MEM_RESERVE) return EXCEPTION_CONTINUE_SEARCH;
+    if (!VirtualQuery(p, &mbi, sizeof mbi)) return EXCEPTION_CONTINUE_SEARCH;
+    /* (hookshot) two threads touching one uncommitted 64 KB block fault together: the second finds it committed by
+       the first, and its access goes through when tried again. It was passed on as a crash: rare for stray touches,
+       seconds into a load once the whole heap is committed this way (HOS_HEAP_ON_TOUCH) */
+    if (mbi.State == MEM_COMMIT && mbi.Protect == PAGE_READWRITE && rec->ExceptionInformation[0] <= 1)   /* (a read or a write) */
+        return EXCEPTION_CONTINUE_EXECUTION;
+    if (mbi.State != MEM_RESERVE) return EXCEPTION_CONTINUE_SEARCH;
     static volatile LONG touched;
     if (InterlockedIncrement(&touched) <= 16)
         hos_log("mem: %#llx committed on first touch (nothing handed it out)", (unsigned long long)guest);
